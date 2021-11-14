@@ -1,8 +1,19 @@
 ###############################################################################
 # Description:	Bootstrap config for home RB5009 router
 # Credit to:	https://forum.mikrotik.com/viewtopic.php?t=143620
-# RouterOS:		7.1.rc6
-# Notes:		Load instructions: /system reset-configuration no-defaults=yes skip-backup=yes run-after-reset=rb5009-config.rsc
+# RouterOS:	7.1.rc6
+#
+# VLAN Config:  BASE = 99
+#		HOME = 10
+#		IOT = 20
+#		GUEST = 30
+#
+# Port Config:	ether1 = WAN
+#		ether[2,3,4] = hybrid for unifi APs
+#		ether[5,6,7,sfp] = trunk for future switches 
+#		ether8 = access port for management
+#
+# Notes:	Load instructions: /system reset-configuration no-defaults=yes skip-backup=yes run-after-reset=rb5009-config.rsc
 ###############################################################################
 
 # Wait for interfaces to be ready
@@ -16,6 +27,7 @@
 };
 
 :log info "Starting router configuration script";
+
 
 #######################################
 # Naming
@@ -40,7 +52,7 @@
 #######################################
 
 # create one bridge, set VLAN mode off while we configure
-/interface bridge add name=BR1 protocol-mode=none vlan-filtering=no
+/interface bridge add name=BR1 protocol-mode=stp vlan-filtering=no
 
 
 #######################################
@@ -55,17 +67,22 @@ add bridge=BR1 interface=ether4
 add bridge=BR1 interface=ether5
 add bridge=BR1 interface=ether6
 add bridge=BR1 interface=ether7
+# Dedicate ether8 as an access port for management
 add bridge=BR1 interface=ether8 pvid=99
 add bridge=BR1 interface=sfp-sfpplus
 
-# egress behavior, handled automatically
-
-# L3 switching so Bridge must be a tagged member
+# egress behavior
 /interface bridge vlan
-add bridge=BR1 tagged=BR1,ether2,ether3,ether4,ether5,ether6,ether7,ether8,sfp-sfpplus vlan-ids=10
-add bridge=BR1 tagged=BR1,ether2,ether3,ether4,ether5,ether6,ether7,ether8,sfp-sfpplus vlan-ids=20
-add bridge=BR1 tagged=BR1,ether2,ether3,ether4,ether5,ether6,ether7,ether8,sfp-sfpplus vlan-ids=30
-add bridge=BR1 tagged=BR1,ether2,ether3,ether4,ether5,ether6,ether7,ether8,sfp-sfpplus vlan-ids=99
+set bridge=BR1 tagged=BR1,ether2,ether3,ether4,ether5,ether6,ether7,sfp-sfpplus vlan-ids=10
+add bridge=BR1 tagged=BR1,ether2,ether3,ether4,ether5,ether6,ether7,sfp-sfpplus vlan-ids=20
+add bridge=BR1 tagged=BR1,ether2,ether3,ether4,ether5,ether6,ether7,sfp-sfpplus vlan-ids=30
+add bridge=BR1 tagged=BR1,ether2,ether3,ether4,ether5,ether6,ether7,sfp-sfpplus vlan-ids=99
+
+# For Unifi APs, they need to be on hybrid ports as
+# they need an untagged vlan for management. This will
+# place untagged traffic from those ports on the BASE vlan.
+/interface bridge vlan
+set bridge=BR1 tagged=ether2,ether3,ether4 [find vlan-ids=99]
 
 
 #######################################
@@ -111,7 +128,7 @@ add bridge=BR1 tagged=BR1,ether2,ether3,ether4,ether5,ether6,ether7,ether8,sfp-s
 /ip dhcp-server add address-pool=GUEST_POOL interface=GUEST_VLAN name=GUEST_DHCP disabled=no
 /ip dhcp-server network add address=10.0.30.0/24 dns-server=192.168.0.1 gateway=10.0.30.1
 
-# Create a DHCP instance for BASE_VLAN. Convenience feature for an admin.
+# Create a DHCP instance for BASE_VLAN. Convenience for administration.
 /ip pool add name=BASE_POOL ranges=192.168.0.10-192.168.0.254
 /ip dhcp-server add address-pool=BASE_POOL interface=BASE_VLAN name=BASE_DHCP disabled=no
 /ip dhcp-server network add address=192.168.0.0/24 dns-server=192.168.0.1 gateway=192.168.0.1
@@ -142,7 +159,9 @@ add interface=BASE_VLAN  list=BASE
 ##################
 # INPUT CHAIN
 ##################
-add chain=input action=accept connection-state=established,related comment="Allow Estab & Related"
+add chain=input action=accept connection-state=established,related,untracked comment="Allow Estab & Related"
+add chain=input action=drop connection-state=invalid comment="Drop invalid"
+add chain=input action=accept protocol=icmp comment="Accept ICMP"
 
 # Allow VLANs to access router services like DNS, Winbox. Naturally, you SHOULD make it more granular.
 add chain=input action=accept in-interface-list=VLAN comment="Allow VLAN"
@@ -175,16 +194,20 @@ add chain=forward action=drop comment="Drop"
 # VLAN Security
 #######################################
 
-# Only allow ingress packets without tags on Access Ports
+# Hybrid ports for Unifi APs
 /interface bridge port
-set bridge=BR1 ingress-filtering=yes frame-types=admit-only-vlan-tagged [find interface=ether2]
-set bridge=BR1 ingress-filtering=yes frame-types=admit-only-vlan-tagged [find interface=ether3]
-set bridge=BR1 ingress-filtering=yes frame-types=admit-only-vlan-tagged [find interface=ether4]
+set bridge=BR1 ingress-filtering=yes frame-types=admit-all [find interface=ether2]
+set bridge=BR1 ingress-filtering=yes frame-types=admit-all [find interface=ether3]
+set bridge=BR1 ingress-filtering=yes frame-types=admit-all [find interface=ether4]
+
+# Trunk ports for switches
 set bridge=BR1 ingress-filtering=yes frame-types=admit-only-vlan-tagged [find interface=ether5]
 set bridge=BR1 ingress-filtering=yes frame-types=admit-only-vlan-tagged [find interface=ether6]
 set bridge=BR1 ingress-filtering=yes frame-types=admit-only-vlan-tagged [find interface=ether7]
-set bridge=BR1 ingress-filtering=yes frame-types=admit-only-untagged-and-priority-tagged [find interface=ether8]
 set bridge=BR1 ingress-filtering=yes frame-types=admit-only-vlan-tagged [find interface=sfp-spfplus]
+
+# Access port for management server
+set bridge=BR1 ingress-filtering=yes frame-types=admit-only-untagged-and-priority-tagged [find interface=ether8]
 
 
 #######################################
